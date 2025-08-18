@@ -1,47 +1,160 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
-import os
+import pyodbc
 
-st.set_page_config(page_title="Food Waste Management", layout="wide")
+# --------------------------------------------------
+# PAGE CONFIG
+# --------------------------------------------------
+st.set_page_config(page_title="Local Food Wastage Management", layout="wide")
 
-# Load DB path from secrets
-db_path = st.secrets["DB_PATH"]
+# --------------------------------------------------
+# SQL SERVER CONNECTION (Windows Authentication)
+# If you use SQL Login instead, see the commented block below.
+# --------------------------------------------------
+CONN_STR = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=localhost;"
+    "DATABASE=FoodWastageDB;"
+    "Trusted_Connection=yes;"
+)
 
-# Connect to SQLite
-def get_connection():
-    return sqlite3.connect(db_path)
+# --- Use this instead if you log in with SQL username/password ---
+# CONN_STR = (
+#     "DRIVER={ODBC Driver 17 for SQL Server};"
+#     "SERVER=localhost;"
+#     "DATABASE=FoodWastageDB;"
+#     "UID=YOUR_USERNAME;"
+#     "PWD=YOUR_PASSWORD;"
+# )
 
-# Sample function to fetch data
-def show_data():
+def read_view(view_name: str) -> pd.DataFrame:
+    """Read a SQL Server view into a DataFrame."""
     try:
-        conn = get_connection()
-        query = "SELECT * FROM Food_Listing LIMIT 5;"
-        df = pd.read_sql_query(query, conn)  # ✅ Use pandas to fetch data
-        st.dataframe(df)  # ✅ Proper way to display
-        conn.close()
+        with pyodbc.connect(CONN_STR) as conn:
+            return pd.read_sql(f"SELECT * FROM {view_name}", conn)
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Failed to read view `{view_name}`: {e}")
+        return pd.DataFrame()
 
-st.title("🍽️ Food Waste Management System")
+# --------------------------------------------------
+# SIDEBAR NAV
+# --------------------------------------------------
+st.sidebar.title("Food Donation Analytics")
+page = st.sidebar.radio(
+    "Go to Page:",
+    ["Provider Overview", "Claims Overview", "Available Food", "Food Movement Tracking"]
+)
 
-menu = ["Home", "Database Playground"]
-choice = st.sidebar.selectbox("Menu", menu)
+# --------------------------------------------------
+# PROVIDER OVERVIEW (Food_With_Provider)
+# --------------------------------------------------
+if page == "Provider Overview":
+    st.title("📊 Provider Overview")
+    df = read_view("Food_With_Provider")
 
-if choice == "Home":
-    st.subheader("Welcome to the Food Waste Management App")
-    st.write("This app helps track food donations and reduce waste.")
-    show_data()  # ✅ Show sample table on Home page
+    if df.empty:
+        st.warning("`Food_With_Provider` returned no rows.")
+    else:
+        # KPIs (robust to slight column-name variations)
+        unique_providers = (
+            df["Provider_ID"].nunique()
+            if "Provider_ID" in df.columns
+            else df["Provider_Name"].nunique()
+        )
+        total_items = df["Food_ID"].nunique() if "Food_ID" in df.columns else len(df)
+        total_qty = int(df["Quantity"].sum()) if "Quantity" in df.columns else 0
 
-elif choice == "Database Playground":
-    st.subheader("🔍 SQL Playground (Read-Only Mode)")
-    query = st.text_area("Enter your SQL query", "SELECT * FROM Food_Listing LIMIT 5;")
-    
-    if st.button("Run Query"):
-        try:
-            conn = get_connection()
-            df = pd.read_sql_query(query, conn)  # ✅ Return as DataFrame
-            st.dataframe(df)
-            conn.close()
-        except Exception as e:
-            st.error(f"Query failed: {e}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Unique Providers", int(unique_providers))
+        c2.metric("Food Items Listed", int(total_items))
+        c3.metric("Total Quantity", total_qty)
+
+        st.write("### Listings")
+        st.dataframe(df, use_container_width=True)
+
+# --------------------------------------------------
+# CLAIMS OVERVIEW (Food_Claims)
+# --------------------------------------------------
+elif page == "Claims Overview":
+    st.title("📥 Claims Overview")
+    df = read_view("Food_Claims")
+
+    if df.empty:
+        st.warning("`Food_Claims` returned no rows.")
+    else:
+        total_claims = len(df)
+        unique_receivers = (
+            df["Receiver_ID"].nunique()
+            if "Receiver_ID" in df.columns
+            else df["Receiver_Name"].nunique()
+        )
+        completed = (
+            df["Status"].str.lower().eq("completed").sum()
+            if "Status" in df.columns and df["Status"].dtype == "object"
+            else 0
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Claims", int(total_claims))
+        c2.metric("Unique Receivers", int(unique_receivers))
+        c3.metric("Completed Claims", int(completed))
+
+        st.write("### Claim Details")
+        st.dataframe(df, use_container_width=True)
+
+# --------------------------------------------------
+# AVAILABLE FOOD (Available_Food)
+# --------------------------------------------------
+elif page == "Available Food":
+    st.title("🥗 Available Food")
+    df = read_view("Available_Food")
+
+    if df.empty:
+        st.warning("`Available_Food` returned no rows.")
+    else:
+        total_items = df["Food_ID"].nunique() if "Food_ID" in df.columns else len(df)
+        total_qty = int(df["Quantity"].sum()) if "Quantity" in df.columns else 0
+
+        c1, c2 = st.columns(2)
+        c1.metric("Available Items", int(total_items))
+        c2.metric("Total Available Quantity", total_qty)
+
+        # Optional quick filter by city/location if present
+        filter_col = None
+        for candidate in ["Location", "Provider_City", "City"]:
+            if candidate in df.columns:
+                filter_col = candidate
+                break
+
+        if filter_col:
+            cities = ["(All)"] + sorted([x for x in df[filter_col].dropna().unique()])
+            chosen = st.selectbox(f"Filter by {filter_col}", options=cities, index=0)
+            if chosen != "(All)":
+                df = df[df[filter_col] == chosen]
+
+        st.write("### Available Listings")
+        st.dataframe(df, use_container_width=True)
+
+# --------------------------------------------------
+# FOOD MOVEMENT (Food_Movement)
+# --------------------------------------------------
+elif page == "Food Movement Tracking":
+    st.title("🚚 Food Movement Tracking")
+    df = read_view("Food_Movement")
+
+    if df.empty:
+        st.warning("`Food_Movement` returned no rows.")
+    else:
+        # Simple KPIs
+        total_rows = len(df)
+        unique_pairs = (
+            df[["Provider_Name", "Receiver_Name"]].dropna().drop_duplicates().shape[0]
+            if {"Provider_Name", "Receiver_Name"}.issubset(df.columns)
+            else total_rows
+        )
+        c1, c2 = st.columns(2)
+        c1.metric("Movements Logged", int(total_rows))
+        c2.metric("Unique Provider → Receiver Pairs", int(unique_pairs))
+
+        st.write("### Movement Log")
+        st.dataframe(df, use_container_width=True)
